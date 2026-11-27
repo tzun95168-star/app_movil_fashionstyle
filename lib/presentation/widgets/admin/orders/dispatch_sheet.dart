@@ -1,0 +1,295 @@
+// @source-mirror: src/views/admin/VistaPedidosyFacturas.vue, src/components/pedidos/ModalGestionDespacho.vue, src/components/facturas/ModalCrearFactura.vue, src/components/facturas/ModalCargaMasivaFacturas.vue, src/views/admin/VistaProduccion.vue, src/components/produccion/CalculadoraProduccion.vue, src/components/produccion/GestorOrdenesProduccion.vue
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:fashion_style_mobile/core/network/api_client.dart';
+import 'package:fashion_style_mobile/core/network/change_bus.dart';
+import 'package:fashion_style_mobile/core/theme/fashion_theme.dart';
+import 'package:fashion_style_mobile/data/models/order/order_model.dart';
+import 'package:fashion_style_mobile/data/services/order_service.dart';
+
+// Modal Gestión de Despacho
+class ModalGestionDespachoSheet extends StatefulWidget {
+  final OrderModel pedido;
+  final VoidCallback onActualizado;
+
+  const ModalGestionDespachoSheet({super.key, required this.pedido, required this.onActualizado});
+
+  @override
+  State<ModalGestionDespachoSheet> createState() => _ModalGestionDespachoSheetState();
+}
+
+class _ModalGestionDespachoSheetState extends State<ModalGestionDespachoSheet> {
+  late String _estado;
+  late String _transportadora;
+  final TextEditingController _guiaCtrl = TextEditingController();
+  final TextEditingController _notasCtrl = TextEditingController();
+  bool _guardando = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _estado = widget.pedido.estado;
+    _transportadora = widget.pedido.empresaTransportadora.isNotEmpty
+        ? widget.pedido.empresaTransportadora
+        : OrderService.transportadorasSugeridas.first;
+    _guiaCtrl.text = widget.pedido.numeroGuia;
+    _notasCtrl.text = widget.pedido.notas;
+  }
+
+  List<MapEntry<String, String>> _obtenerEstadosPermitidos(String estadoActual) {
+    const jerarquia = {
+      'Pendiente_Pago': 0,
+      'Pagado': 1,
+      'En_Preparacion': 2,
+      'Enviado': 3,
+      'Entregado': 4,
+    };
+    final nivelActual = jerarquia[estadoActual] ?? -1;
+
+    final permitidos = OrderService.estadosPedido.entries.where((e) {
+      if (e.key == 'Cancelado') {
+        return estadoActual != 'Enviado' && estadoActual != 'Entregado';
+      }
+      final nivel = jerarquia[e.key] ?? -1;
+      return nivel >= nivelActual;
+    }).toList();
+
+    if (!permitidos.any((e) => e.key == _estado)) {
+      _estado = estadoActual;
+    }
+
+    return permitidos;
+  }
+
+  Future<void> _guardar() async {
+    final est = widget.pedido.estado.toLowerCase();
+    if (est == 'cancelado' || est == 'rechazado' || est == 'entregado') {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Un pedido en estado "${widget.pedido.estado}" no puede ser modificado.'),
+          backgroundColor: FashionColors.peligro,
+          duration: const Duration(milliseconds: 1600),
+        ),
+      );
+      return;
+    }
+
+    if ((_estado == 'Enviado' || _estado == 'Entregado')) {
+      final guia = _guiaCtrl.text.trim();
+      if (!RegExp(r'^[A-Za-z0-9-]{4,40}$').hasMatch(guia)) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Para pedidos enviados o entregados, el número de guía es obligatorio (4-40 caracteres alfanuméricos)'),
+            duration: Duration(milliseconds: 1600),
+          ),
+        );
+        return;
+      }
+    }
+
+    if (_estado == 'Cancelado') {
+      final conf = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text('Cancelar pedido', style: GoogleFonts.montserrat(fontWeight: FontWeight.w700)),
+          content: Text('¿Estás seguro de cancelar este pedido? Se liberará el stock reservado.', style: GoogleFonts.poppins(fontSize: 13)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('No')),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: FashionColors.peligro),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Sí, cancelar', style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        ),
+      );
+      if (conf != true) return;
+    }
+
+    setState(() => _guardando = true);
+    try {
+      await OrderService.instance.actualizarDespacho(
+        widget.pedido.id,
+        estado: _estado,
+        transportadora: _transportadora,
+        numeroGuia: _guiaCtrl.text.trim(),
+        notas: _notasCtrl.text.trim(),
+      );
+      ChangeBus.instance.notifyAll(['pedidos', 'dashboard']);
+      widget.onActualizado();
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Pedido ${widget.pedido.referencia} actualizado a ${OrderService.estadosPedido[_estado] ?? _estado}'),
+            backgroundColor: FashionColors.verdeExito,
+            duration: const Duration(milliseconds: 1600),
+          ),
+        );
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(ApiClient.obtenerMensajeError(e, 'No se pudo actualizar el estado de despacho.')),
+            backgroundColor: FashionColors.peligro,
+            duration: const Duration(milliseconds: 1600),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _guardando = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final est = widget.pedido.estado.toLowerCase();
+    final bool bloqueado = est == 'cancelado' || est == 'rechazado' || est == 'entregado';
+    final estadosDisponibles = _obtenerEstadosPermitidos(widget.pedido.estado);
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: FashionColors.backgroundCanvas,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 12,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 44,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 14),
+                decoration: BoxDecoration(
+                  color: FashionColors.bordeClaro,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Row(
+              children: [
+                Text(
+                  'Gestionar Despacho ',
+                  style: GoogleFonts.montserrat(fontWeight: FontWeight.w700, fontSize: 17, color: FashionColors.textoPrincipal),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: FashionColors.surfaceSecondary,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: FashionColors.bordeClaro),
+                  ),
+                  child: Text(
+                    widget.pedido.referencia,
+                    style: GoogleFonts.jetBrainsMono(fontWeight: FontWeight.w700, fontSize: 12, color: FashionColors.textoPrincipal),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+
+            if (bloqueado)
+              Container(
+                margin: const EdgeInsets.only(bottom: 14),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: FashionColors.peligro.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: FashionColors.peligro.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.lock, color: FashionColors.peligro, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Este pedido se encuentra en estado "${widget.pedido.estado}". No es posible modificar su estado de despacho.',
+                        style: GoogleFonts.poppins(fontSize: 12, color: FashionColors.peligro, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            DropdownButtonFormField<String>(
+              initialValue: estadosDisponibles.any((e) => e.key == _estado) ? _estado : estadosDisponibles.first.key,
+              style: GoogleFonts.poppins(fontSize: 13, color: FashionColors.textoPrincipal),
+              decoration: InputDecoration(
+                labelText: 'Estado del pedido',
+                filled: true,
+                fillColor: FashionColors.surfaceSecondary,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: FashionColors.bordeClaro)),
+              ),
+              items: estadosDisponibles.map((e) => DropdownMenuItem(value: e.key, child: Text(e.value))).toList(),
+              onChanged: bloqueado ? null : (v) => setState(() => _estado = v ?? _estado),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: OrderService.transportadorasSugeridas.contains(_transportadora) ? _transportadora : OrderService.transportadorasSugeridas.first,
+              style: GoogleFonts.poppins(fontSize: 13, color: FashionColors.textoPrincipal),
+              decoration: InputDecoration(
+                labelText: 'Empresa transportadora',
+                filled: true,
+                fillColor: FashionColors.surfaceSecondary,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: FashionColors.bordeClaro)),
+              ),
+              items: OrderService.transportadorasSugeridas.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+              onChanged: bloqueado ? null : (v) => setState(() => _transportadora = v ?? _transportadora),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _guiaCtrl,
+              enabled: !bloqueado,
+              style: GoogleFonts.jetBrainsMono(fontSize: 13, fontWeight: FontWeight.w600),
+              decoration: InputDecoration(
+                labelText: 'Número de guía de despacho',
+                filled: true,
+                fillColor: FashionColors.surfaceSecondary,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: FashionColors.bordeClaro)),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _notasCtrl,
+              enabled: !bloqueado,
+              style: GoogleFonts.poppins(fontSize: 13),
+              decoration: InputDecoration(
+                labelText: 'Notas operativas de despacho',
+                filled: true,
+                fillColor: FashionColors.surfaceSecondary,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: FashionColors.bordeClaro)),
+              ),
+            ),
+            const SizedBox(height: 18),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: bloqueado ? FashionColors.textoMuted.withValues(alpha: 0.3) : FashionColors.primaryCorporate,
+                foregroundColor: bloqueado ? FashionColors.textoMuted : Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              ),
+              onPressed: (bloqueado || _guardando) ? null : _guardar,
+              child: _guardando
+                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                  : Text('Actualizar Despacho', style: GoogleFonts.poppins(fontWeight: FontWeight.w700, fontSize: 14)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
